@@ -1,0 +1,27 @@
+# Environnements / caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# Code de référence tiers (non distribué) : claude-swap, AntigravityManager
+_reference/
+
+# Sécurité : ne JAMAIS committer de credentials/identités/exports
+*.email
+*credential*.json
+*oauth*.json
+*_token
+current_claude
+current_agy
+cli-switch-export*.tar.gz
+*.env
+secrets*
+
+# Client OAuth Antigravity (secret, local uniquement)
+src/cli_switch/agy/_oauth_client.py

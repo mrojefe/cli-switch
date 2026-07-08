@@ -1,0 +1,6 @@
+"""Copie ce fichier en `_oauth_client.py` (non suivi par git) et remplis les
+valeurs du client OAuth « installé » d'Antigravity, extraites du binaire `agy`.
+Alternative : exporter AGY_OAUTH_CLIENT_ID / AGY_OAUTH_CLIENT_SECRET dans l'env.
+Requis uniquement pour le proxy AGY multi-compte (hot-swap)."""
+CLIENT_ID = "<votre-client-id>.apps.googleusercontent.com"
+CLIENT_SECRET = "<votre-client-secret-antigravity>"
