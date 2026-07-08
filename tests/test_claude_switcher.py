@@ -93,11 +93,15 @@ def test_switch_to_migrated_profile_without_identity(fake_home, store):
     assert store.current_claude() == "legacy"
 
 
-def test_login_reuses_slot_on_same_email(fake_home, store):
+def test_login_same_email_is_non_destructive(fake_home, store):
+    """Régression 2026-07-08 : capturer un compte déjà enregistré sous un autre
+    nom NE DOIT PLUS supprimer ce profil (c'est ce qui a détruit jfe). Les deux
+    profils gardent leurs credentials."""
     _write_active_claude("a@example.com")
     switcher.login(store, "a")
-    switcher.login(store, "a-bis")  # même email actif, nouveau nom de profil
+    switcher.login(store, "a-bis")  # même compte, nouveau nom
 
-    # L'ancien profil 'a' ne doit plus revendiquer cet email côté Claude
-    assert store.find_profile_by_email("claude", "a@example.com") == "a-bis"
-    assert not store.profile("a").claude_email.exists()
+    assert store.profile("a").claude_credentials.exists()
+    assert store.profile("a-bis").claude_credentials.exists()
+    assert store.profile("a").claude_email.read_text(encoding="utf-8") == "a@example.com"
+    assert store.profile("a-bis").claude_email.read_text(encoding="utf-8") == "a@example.com"

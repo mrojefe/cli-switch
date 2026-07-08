@@ -125,15 +125,14 @@ def login(store: Store, name: str, *, force: bool = False) -> str:
         )
 
     with cli_switch_lock(store.lock_path):
-        if email:
-            existing = store.find_profile_by_email("claude", email)
-            if existing and existing != name:
-                # Même piège que l'ancien bash : le navigateur peut avoir
-                # réutilisé une session existante au lieu d'un nouveau login.
-                # On ne supprime que le côté Claude de l'ancien profil — son
-                # côté AGY (s'il existe) reste intact.
-                store.clear_claude_side(existing)
-
+        # ⚠️ NE JAMAIS supprimer un autre profil ici. Une ancienne version
+        # « dédoublonnait » en effaçant le côté Claude de tout profil portant le
+        # même email — ce qui a DÉTRUIT le profil principal (jfe) quand un
+        # `add luc` a capturé par erreur le compte courant (2026-07-08). Deux
+        # profils peuvent pointer le même compte : c'est inoffensif et réversible
+        # (un simple `rm`), alors qu'une suppression silencieuse force un
+        # re-login et fait perdre des tokens. Le doublon éventuel est signalé
+        # côté CLI (non destructif).
         profile = store.profile(name)
         profile.root.mkdir(parents=True, exist_ok=True)
         # On sauvegarde les credentials (tokens) ET le bloc oauthAccount

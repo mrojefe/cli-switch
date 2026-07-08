@@ -50,6 +50,27 @@ def _warn(msg: str) -> None:
     typer.secho(f"⚠ {msg}", fg=typer.colors.YELLOW, err=True)
 
 
+def _warn_duplicate_claude(store: Store, name: str, email: str | None) -> None:
+    """Signale (SANS rien supprimer) qu'un autre profil porte déjà ce compte
+    Claude. Remplace l'ancien dédoublonnage destructif qui effaçait le profil
+    en double (et a fait perdre jfe le 2026-07-08)."""
+    if not email:
+        return
+    dupes = [
+        p
+        for p in store.list_profiles()
+        if p != name
+        and store.profile(p).claude_email.exists()
+        and store.profile(p).claude_email.read_text(encoding="utf-8").strip() == email
+    ]
+    if dupes:
+        _warn(
+            f"Le compte {email} est aussi enregistré sous : {', '.join(dupes)}. "
+            "Rien n'a été supprimé — retire un doublon avec "
+            "`cli-switch claude rm <nom>` si tu veux."
+        )
+
+
 # ── claude login/switch ──────────────────────────────────────────────────
 
 
@@ -81,6 +102,7 @@ def claude_login(
         _fail(str(e))
         return
     _ok(f"Profil Claude '{name}' enregistré ({email or 'email inconnu'}).")
+    _warn_duplicate_claude(store, name, email)
 
 
 @claude_app.command("current")
@@ -115,14 +137,13 @@ def claude_add(
             _fail(str(e))
             return
     try:
-        claude_switcher.login(store, name)
+        email = claude_switcher.login(store, name)
     except CliSwitchError as e:
         _fail(str(e))
         return
-    # Restaurer l'ancien actif — mais SEULEMENT s'il a encore des credentials
-    # Claude. Cas limite : si `name` capturait le MÊME compte que l'actif,
-    # login() a dédoublonné et vidé le côté Claude de l'ancien profil ; tenter
-    # de re-switcher dessus lèverait alors ProfileNotFoundError (crash observé).
+    # Restaurer l'ancien actif s'il a des credentials Claude. login() ne
+    # supprime plus jamais un autre profil (cf. switcher), donc l'ancien actif
+    # garde les siens — la restauration fonctionne et on ne perd pas jfe.
     can_restore = (
         active_before
         and active_before != name
@@ -132,11 +153,13 @@ def claude_add(
         try:
             claude_switcher.switch_to(store, active_before, force=True)
             _ok(f"Profil Claude '{name}' enregistré ; compte précédent '{active_before}' restauré comme actif.")
+            _warn_duplicate_claude(store, name, email)
             return
         except CliSwitchError as e:
             _warn(f"Profil '{name}' enregistré, mais restauration de '{active_before}' impossible : {e}")
             return
     _ok(f"Profil Claude '{name}' enregistré et actif.")
+    _warn_duplicate_claude(store, name, email)
 
 
 @claude_app.command("rm")
