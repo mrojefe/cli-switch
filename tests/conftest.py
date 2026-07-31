@@ -50,6 +50,11 @@ def _no_real_claude_daemon(monkeypatch):
     from cli_switch.claude import switcher
 
     monkeypatch.setattr(switcher, "_stop_claude_daemon", lambda: None)
+    # Idem pour le redémarrage déterministe post-swap : sans ça, un test
+    # lancerait le VRAI `claude daemon run` sur la machine (effet de bord non
+    # déterministe, et potentiellement une course avec le vrai démon en cours
+    # d'utilisation — exactement le bug que ce mécanisme corrige).
+    monkeypatch.setattr(switcher, "restart_claude_daemon_and_verify", lambda *a, **k: True)
 
     # Ne JAMAIS déclencher un vrai `claude auth login` (interactif, navigateur)
     # depuis un test — lèverait/bloquerait la suite.

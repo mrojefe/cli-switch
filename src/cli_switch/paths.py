@@ -65,6 +65,16 @@ def claude_ide_lock_dir() -> Path:
     return claude_config_home() / "ide"
 
 
+def claude_daemon_auth_status_path() -> Path:
+    """Écrit par le démon Claude Code lui-même à chaque tentative de
+    rafraîchissement OAuth ('{"status":"auth_required"|"ok",...}'). Utilisé
+    pour vérifier qu'un démon relancé après un switch est bien sain, au lieu
+    de supposer que `sleep(1)` suffit (course observée : 93 collisions
+    "another daemon is already running" + un blocage mesuré de 45h en
+    auth_required dans daemon.log, 2026-07-31)."""
+    return claude_config_home() / "daemon-auth-status.json"
+
+
 # ── Chemins AGY (Antigravity CLI) ───────────────────────────────────────────
 
 AGY_PATHS_UNVERIFIED_PLATFORMS = {"win32"}

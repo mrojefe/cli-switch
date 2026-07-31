@@ -6,7 +6,7 @@ import typer
 
 from cli_switch.agy import switcher as agy_switcher
 from cli_switch.claude import switcher as claude_switcher
-from cli_switch.exceptions import CliSwitchError, LiveProcessConflict
+from cli_switch.exceptions import CliSwitchError, DaemonRestartFailed, LiveProcessConflict
 from cli_switch.store import Store
 
 # `-h` en plus de `--help` partout (sans ça, seul --help marche, ce qui
@@ -91,6 +91,15 @@ def claude_login(
     ré-enregistrer le token frais de ta session en cours)."""
     store = _store()
     if not current:
+        _info(
+            "Le navigateur va s'ouvrir (ou un lien sera affiché). "
+            "Connecte-toi avec le bon compte, puis copie le CODE de l'URL de callback."
+        )
+        _info(
+            "⚠ Quand 'Paste code here if prompted >' apparaît : "
+            "COLLE le code et appuie sur Entrée. "
+            "La saisie est INVISIBLE (masquée comme un mot de passe) — c'est normal."
+        )
         try:
             claude_switcher.run_claude_auth_login()
         except RuntimeError as e:
@@ -178,29 +187,76 @@ def claude_rm(name: str, yes: bool = typer.Option(False, "-y", "--yes")) -> None
     _ok(f"Claude retiré du profil '{name}'.")
 
 
+@claude_app.command("clear")
+def claude_clear_all(yes: bool = typer.Option(False, "-y", "--yes")) -> None:
+    """Efface les credentials Claude de TOUS les profils (garde AGY intact)
+    ET remet à zéro les fichiers live de Claude Code (~/.claude/.credentials.json,
+    ~/.claude.json) pour repartir d'un état vierge."""
+    import json
+    from cli_switch.paths import claude_credentials_path, claude_global_config_path
+
+    store = _store()
+    profiles = [n for n in store.list_profiles() if store.profile(n).claude_credentials.exists()]
+    if not yes and not typer.confirm(
+        f"⚠ Effacer les credentials Claude de {len(profiles)} profil(s) + fichiers live ? (AGY conservé)",
+        default=False,
+    ):
+        raise typer.Exit(code=1)
+
+    # 1. Profils stockés
+    for name in profiles:
+        store.clear_claude_side(name)
+        store.remove_profile_if_empty(name)
+    store.current_claude_path.unlink(missing_ok=True)
+
+    # 2. Fichier live ~/.claude/.credentials.json → structure vide valide
+    live_creds = claude_credentials_path()
+    if live_creds.exists():
+        empty = {"claudeAiOauth": {"accessToken": "", "refreshToken": "", "expiresAt": 0,
+                                    "scopes": [], "subscriptionType": ""}}
+        live_creds.write_text(json.dumps(empty, indent=2), encoding="utf-8")
+        _info(f"Fichier live réinitialisé : {live_creds}")
+
+    # 3. ~/.claude.json : on vide UNIQUEMENT oauthAccount (ne PAS supprimer
+    #    ce fichier — il contient l'état des projets/onboarding Claude et
+    #    sa suppression casse `claude auth login`).
+    global_cfg = claude_global_config_path()
+    if global_cfg.exists():
+        import json as _j
+        try:
+            _d = _j.loads(global_cfg.read_text(encoding="utf-8"))
+            _d.pop("oauthAccount", None)
+            global_cfg.write_text(_j.dumps(_d, indent=2), encoding="utf-8")
+            _info(f"oauthAccount effacé dans : {global_cfg} (fichier conservé)")
+        except Exception:
+            pass
+
+    if profiles:
+        _ok(f"Credentials Claude effacés sur {len(profiles)} profil(s) + fichiers live réinitialisés.")
+    else:
+        _ok("Fichiers live Claude réinitialisés (aucun profil stocké à effacer).")
+
+
 @claude_app.command("switch")
 def claude_switch_cmd(name: str) -> None:
     """Bascule Claude vers le profil <name>."""
     store = _store()
-    # Profil sans identité stockée (ex: migré de l'ancien claude-switch qui ne
-    # stockait que les credentials) → Claude dira « aucun compte » après le
-    # swap. On prévient AVANT et on propose de continuer.
     has_identity = store.profile(name).claude_oauth_account.exists()
     try:
         warning = claude_switcher.switch_to(store, name)
-    except LiveProcessConflict as e:
-        _warn(str(e))
-        if not typer.confirm("Continuer quand même ?", default=False):
-            raise typer.Exit(code=1)
+    except LiveProcessConflict:
+        # Ne devrait plus arriver (switcher auto-force) mais au cas où
         warning = claude_switcher.switch_to(store, name, force=True)
+    except DaemonRestartFailed as e:
+        # Non fatal : les credentials ont bien basculé, seule la vérification
+        # du redémarrage du démon a expiré. Le switch est réel.
+        warning = None
+        _warn(str(e))
     except CliSwitchError as e:
         _fail(str(e))
         return
     if warning:
-        _warn(
-            f"Claude Code était actif ({warning.describe()}) — ce process ne "
-            "verra le changement qu'au prochain lancement."
-        )
+        _info(f"Sessions actives détectées — daemon stoppé, switch effectué sur '{name}'.")
     _ok(f"Claude → profil '{name}' actif.")
     if not has_identity:
         _warn(
@@ -285,6 +341,45 @@ def agy_rm(name: str, yes: bool = typer.Option(False, "-y", "--yes")) -> None:
         store.current_agy_path.unlink(missing_ok=True)
     store.remove_profile_if_empty(name)
     _ok(f"AGY retiré du profil '{name}'.")
+
+
+@agy_app.command("clear")
+def agy_clear_all(yes: bool = typer.Option(False, "-y", "--yes")) -> None:
+    """Efface les credentials AGY de TOUS les profils (garde Claude intact)
+    ET remet à zéro les fichiers live d'AGY (~/.gemini/antigravity-cli/antigravity-oauth-token,
+    ~/.gemini/google_accounts.json) pour repartir d'un état vierge."""
+    from cli_switch.paths import agy_live_token_path, agy_google_accounts_path
+
+    store = _store()
+    profiles = [n for n in store.list_profiles() if store.profile(n).agy_live_token.exists()]
+    if not yes and not typer.confirm(
+        f"⚠ Effacer les credentials AGY de {len(profiles)} profil(s) + fichiers live ? (Claude conservé)",
+        default=False,
+    ):
+        raise typer.Exit(code=1)
+
+    # 1. Profils stockés
+    for name in profiles:
+        store.clear_agy_side(name)
+        store.remove_profile_if_empty(name)
+    store.current_agy_path.unlink(missing_ok=True)
+
+    # 2. Token live AGY → supprimé (AGY le recrée au prochain login)
+    live_tok = agy_live_token_path()
+    if live_tok.exists():
+        live_tok.unlink()
+        _info(f"Token live supprimé : {live_tok}")
+
+    # 3. google_accounts.json → supprimé
+    g_accounts = agy_google_accounts_path()
+    if g_accounts.exists():
+        g_accounts.unlink()
+        _info(f"Fichier Google accounts supprimé : {g_accounts}")
+
+    if profiles:
+        _ok(f"Credentials AGY effacés sur {len(profiles)} profil(s) + fichiers live réinitialisés.")
+    else:
+        _ok("Fichiers live AGY réinitialisés (aucun profil stocké à effacer).")
 
 
 @agy_app.command("switch")
@@ -567,13 +662,97 @@ def add_both(name: str) -> None:
 
 
 @app.command("clear")
-def clear_all(yes: bool = typer.Option(False, "-y", "--yes")) -> None:
-    """Supprime TOUS les profils enregistrés (Claude + AGY)."""
+def clear_all(
+    yes: bool = typer.Option(False, "-y", "--yes", help="Pas de confirmation."),
+    claude_only: bool = typer.Option(False, "--claude", help="Efface uniquement la partie Claude de tous les profils."),
+    agy_only: bool = typer.Option(False, "--agy", help="Efface uniquement la partie AGY de tous les profils."),
+) -> None:
+    """Supprime TOUS les profils enregistrés.
+
+    Sans option : efface Claude ET AGY.
+    --claude    : efface uniquement les credentials Claude.
+    --agy       : efface uniquement les credentials AGY.
+    """
     store = _store()
-    if not yes and not typer.confirm("⚠ Supprimer TOUS les profils ?", default=False):
+    profiles = store.list_profiles()
+    if not profiles:
+        _info("Aucun profil à effacer.")
+        return
+
+    if claude_only and agy_only:
+        _fail("--claude et --agy sont mutuellement exclusifs. Utilise l'un ou l'autre.")
+        return
+
+    if claude_only:
+        label = "la partie Claude de TOUS les profils"
+    elif agy_only:
+        label = "la partie AGY de TOUS les profils"
+    else:
+        label = "TOUS les profils (Claude + AGY)"
+
+    if not yes and not typer.confirm(f"⚠ Supprimer {label} ?", default=False):
         raise typer.Exit(code=1)
-    store.clear_all()
-    _ok("Tous les profils supprimés.")
+
+    count = 0
+    for name in profiles:
+        if claude_only:
+            if store.profile(name).claude_credentials.exists():
+                store.clear_claude_side(name)
+                store.remove_profile_if_empty(name)
+                count += 1
+        elif agy_only:
+            if store.profile(name).agy_live_token.exists():
+                store.clear_agy_side(name)
+                store.remove_profile_if_empty(name)
+                count += 1
+        else:
+            store.remove_profile(name)
+            count += 1
+
+    import json as _json
+    from cli_switch.paths import (
+        claude_credentials_path, claude_global_config_path,
+        agy_live_token_path, agy_google_accounts_path,
+    )
+
+    def _reset_claude_live() -> None:
+        live = claude_credentials_path()
+        if live.exists():
+            empty = {"claudeAiOauth": {"accessToken": "", "refreshToken": "",
+                                        "expiresAt": 0, "scopes": [], "subscriptionType": ""}}
+            live.write_text(_json.dumps(empty, indent=2), encoding="utf-8")
+            _info(f"Fichier live réinitialisé : {live}")
+        # Ne PAS supprimer ~/.claude.json — contient projets/onboarding.
+        # On efface seulement oauthAccount pour déconnecter l'identité.
+        _gcfg = claude_global_config_path()
+        if _gcfg.exists():
+            try:
+                _d = _json.loads(_gcfg.read_text(encoding="utf-8"))
+                _d.pop("oauthAccount", None)
+                _gcfg.write_text(_json.dumps(_d, indent=2), encoding="utf-8")
+                _info(f"oauthAccount effacé dans : {_gcfg} (fichier conservé)")
+            except Exception:
+                pass
+
+    def _reset_agy_live() -> None:
+        agy_live_token_path().unlink(missing_ok=True)
+        agy_google_accounts_path().unlink(missing_ok=True)
+        _info("Fichiers live AGY supprimés.")
+
+    if claude_only:
+        store.current_claude_path.unlink(missing_ok=True)
+        _reset_claude_live()
+        _ok(f"Credentials Claude effacés sur {count} profil(s) + fichiers live réinitialisés.")
+    elif agy_only:
+        store.current_agy_path.unlink(missing_ok=True)
+        _reset_agy_live()
+        _ok(f"Credentials AGY effacés sur {count} profil(s) + fichiers live réinitialisés.")
+    else:
+        store.current_claude_path.unlink(missing_ok=True)
+        store.current_agy_path.unlink(missing_ok=True)
+        _reset_claude_live()
+        _reset_agy_live()
+        _ok(f"{count} profil(s) supprimé(s) — Claude + AGY réinitialisés à neuf.")
 
 
 @app.command("export")
@@ -633,11 +812,11 @@ def switch_both(name: str) -> None:
         try:
             warning = claude_switcher.switch_to(store, name)
             if warning:
-                _warn(f"Claude Code était actif ({warning.describe()}).")
-        except LiveProcessConflict as e:
+                _info(f"Sessions actives détectées — daemon stoppé, switch effectué sur '{name}'.")
+        except LiveProcessConflict:
+            claude_switcher.switch_to(store, name, force=True)
+        except DaemonRestartFailed as e:
             _warn(str(e))
-            if typer.confirm("Continuer quand même pour Claude ?", default=False):
-                claude_switcher.switch_to(store, name, force=True)
         except CliSwitchError as e:
             _warn(f"Claude : {e}")
     else:
@@ -662,7 +841,7 @@ _TOP_LEVEL_COMMANDS = {
     "login", "add", "list", "current", "rm", "rename", "switch", "clear",
     "export", "import", "claude", "agy",
 }
-_SUB_COMMANDS = {"login", "add", "switch", "current", "rm", "proxy", "use", "run"}
+_SUB_COMMANDS = {"login", "add", "switch", "current", "rm", "clear", "proxy", "use", "run"}
 
 
 _HELP_WORDS = {"help", "-h", "--help"}

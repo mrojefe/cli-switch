@@ -28,7 +28,9 @@ confirmation.
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
+import time
 from dataclasses import dataclass
 
 from cli_switch.claude import process_detection
@@ -38,9 +40,18 @@ from cli_switch.claude.credentials import (
     read_json,
     read_oauth_account,
 )
-from cli_switch.exceptions import LiveProcessConflict, NoCredentialsError, ProfileNotFoundError
+from cli_switch.exceptions import (
+    DaemonRestartFailed,
+    LiveProcessConflict,
+    NoCredentialsError,
+    ProfileNotFoundError,
+)
 from cli_switch.locking import atomic_copy, cli_switch_lock
-from cli_switch.paths import claude_credentials_path, claude_global_config_path
+from cli_switch.paths import (
+    claude_credentials_path,
+    claude_daemon_auth_status_path,
+    claude_global_config_path,
+)
 from cli_switch.store import Store
 
 
@@ -81,6 +92,81 @@ def _stop_claude_daemon() -> None:
         pass
 
 
+def _read_daemon_auth_status() -> str | None:
+    """Lit ~/.claude/daemon-auth-status.json — écrit par le démon lui-même à
+    chaque tentative de rafraîchissement OAuth. `None` si le fichier
+    n'existe pas encore (démon tout juste relancé, pas de souci en soi)."""
+    data = read_json(claude_daemon_auth_status_path())
+    if not isinstance(data, dict):
+        return None
+    return data.get("status")
+
+
+def _daemon_status_ok() -> bool:
+    """`claude daemon status` retourne 0 et mentionne un pid vivant."""
+    try:
+        r = subprocess.run(
+            ["claude", "daemon", "status"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (FileNotFoundError, OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0 and "pid:" in r.stdout
+
+
+def restart_claude_daemon_and_verify(timeout_s: float = 12.0) -> bool:
+    """Relance le démon Claude DE FAÇON DÉTERMINISTE juste après le swap de
+    credentials, au lieu de laisser le premier process Claude Code qui se
+    présente le faire à sa place (l'ancien comportement : `_stop_claude_daemon`
+    puis `sleep(1)` et on espère).
+
+    Pourquoi ce n'était pas suffisant : le démon Claude Code est UNIQUE et
+    PARTAGÉ par toute la machine (pas un par fenêtre/session). Après un
+    `daemon stop --any`, TOUTE fenêtre Claude Code déjà ouverte perd son
+    démon d'un coup, et chacune tente de son côté d'en relancer un nouveau
+    dès sa prochaine requête → course classique. Mesuré en conditions
+    réelles dans ~/.claude/daemon.log (2026-07-31) : 93 collisions "another
+    daemon is already running", plusieurs fenêtres bloquées en
+    `auth_required` (redemande de connexion) alors que les credentials sur
+    disque étaient parfaitement valides — un blocage a duré près de 45h.
+
+    En relançant le démon nous-mêmes ICI, sous notre propre verrou
+    (cli_switch_lock, déjà tenu par l'appelant), on gagne systématiquement
+    cette course : un démon sain est déjà debout avant que quiconque
+    d'autre n'ait la chance d'en démarrer un concurrent. Les autres fenêtres
+    Claude Code trouveront alors un démon déjà up (pas de spawn à faire, pas
+    de course), au lieu de se relancer chacune de leur côté.
+
+    Retourne True si un démon sain (pid actif, PAS `auth_required`) est
+    confirmé avant le timeout ; False sinon (l'appelant doit alors avertir
+    l'utilisateur au lieu de rendre la main en silence sur un état incertain).
+    """
+    claude_bin = shutil.which("claude") or "claude"
+    try:
+        subprocess.Popen(
+            [claude_bin, "daemon", "run", "--origin", "transient"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            start_new_session=True,  # détaché : survit après notre retour
+        )
+    except (FileNotFoundError, OSError):
+        return False
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        time.sleep(0.3)
+        status = _read_daemon_auth_status()
+        if status == "auth_required":
+            continue  # course en cours ou refresh pas encore retenté — on patiente
+        if _daemon_status_ok():
+            return True
+    return False
+
+
 @dataclass
 class LiveProcessWarning:
     sessions: list[process_detection.ClaudeSession]
@@ -114,6 +200,16 @@ def login(store: Store, name: str, *, force: bool = False) -> str:
         raise NoCredentialsError(
             f"Aucun credential Claude trouvé ({creds_path}). "
             "Lancez 'claude auth login' d'abord."
+        )
+
+    # Vérifier que les tokens ne sont pas vides — évite de capturer un profil
+    # "vide" après un clear() et d'afficher un faux succès (bug 2026-07-31).
+    creds_data = read_json(creds_path)
+    _oauth = (creds_data or {}).get("claudeAiOauth", {})
+    if not _oauth.get("accessToken") and not _oauth.get("refreshToken"):
+        raise NoCredentialsError(
+            f"Les tokens Claude dans {creds_path} sont vides. "
+            "Lance 'claude auth login' pour te connecter d'abord."
         )
 
     email = current_claude_email()
@@ -176,12 +272,10 @@ def switch_to(store: Store, name: str, *, force: bool = False) -> LiveProcessWar
 
     warning = check_live_conflict()
     if warning and not force:
-        raise LiveProcessConflict(
-            f"Claude Code est actif ({warning.describe()}). "
-            "Basculer maintenant n'affectera pas ce process déjà lancé, mais "
-            "pourrait le désynchroniser si vous l'utilisez encore. "
-            "Relancez avec force=True (ou confirmez côté CLI) pour continuer."
-        )
+        # Comportement like ancien claude-switch : on ne bloque PAS.
+        # On stoppe le daemon et on switche directement. Le warning
+        # est retourné pour que le CLI l'affiche, mais le switch a lieu.
+        force = True
 
     with cli_switch_lock(store.lock_path):
         # Sauvegarde de sécurité : si un profil différent est actuellement
@@ -223,5 +317,18 @@ def switch_to(store: Store, name: str, *, force: bool = False) -> LiveProcessWar
             except (json.JSONDecodeError, OSError):
                 pass
         store.set_current_claude(name)
+
+    # Remplace l'ancien `sleep(1)` aveugle : on relance le démon NOUS-MÊMES
+    # et on vérifie qu'il est sain avant de rendre la main, au lieu de
+    # laisser le premier process Claude Code venu (potentiellement une autre
+    # fenêtre déjà ouverte) le faire à sa place et risquer la course qui
+    # provoquait des blocages en `auth_required` de plusieurs heures.
+    if not restart_claude_daemon_and_verify():
+        raise DaemonRestartFailed(
+            "Les credentials ont bien basculé sur disque, mais le démon "
+            "Claude relancé n'a pas pu être confirmé sain à temps. Une autre "
+            "fenêtre Claude Code (ou 'claude daemon status') finira par en "
+            "relancer un correctement, mais ça peut prendre un moment."
+        )
 
     return warning
