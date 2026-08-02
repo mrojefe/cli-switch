@@ -483,9 +483,20 @@ def agy_proxy_start(
 
     log_path = store.data_dir / "agy_proxy.log"
     logf = open(log_path, "a")
+    # `start_new_session` (setsid) est POSIX ONLY — silencieusement ignoré
+    # sur Windows (vérifié : `subprocess._execute_child` y nomme ce
+    # paramètre `unused_start_new_session`). Sans détachement réel sur
+    # Windows, le proxy resterait rattaché à notre process et pourrait
+    # mourir avec `cli-switch agy proxy start` au lieu de survivre en fond.
+    if sys.platform == "win32":
+        popen_kwargs = {
+            "creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        }
+    else:
+        popen_kwargs = {"start_new_session": True}
     proc = subprocess.Popen(
         [sys.executable, "-m", "cli_switch.agy.proxy", "--port", str(port), "--upstream", upstream],
-        stdout=logf, stderr=subprocess.STDOUT, start_new_session=True,
+        stdout=logf, stderr=subprocess.STDOUT, **popen_kwargs,
     )
     # Vérifier qu'il a réellement démarré (Popen réussit même si le proxy
     # crashe au bind). On sonde le port pendant ~3s.

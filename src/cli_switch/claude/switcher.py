@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 
@@ -145,13 +146,24 @@ def restart_claude_daemon_and_verify(timeout_s: float = 12.0) -> bool:
     l'utilisateur au lieu de rendre la main en silence sur un état incertain).
     """
     claude_bin = shutil.which("claude") or "claude"
+    # `start_new_session` (setsid) est POSIX ONLY — silencieusement ignoré
+    # sur Windows (vérifié dans le code source de subprocess._execute_child :
+    # le paramètre y est nommé `unused_start_new_session`). Sans l'équivalent
+    # Windows, le process fils resterait rattaché à notre groupe de process
+    # et pourrait mourir avec nous. `DETACHED_PROCESS` est l'équivalent réel.
+    if sys.platform == "win32":
+        popen_kwargs = {
+            "creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP,
+        }
+    else:
+        popen_kwargs = {"start_new_session": True}
     try:
         subprocess.Popen(
             [claude_bin, "daemon", "run", "--origin", "transient"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             stdin=subprocess.DEVNULL,
-            start_new_session=True,  # détaché : survit après notre retour
+            **popen_kwargs,
         )
     except (FileNotFoundError, OSError):
         return False

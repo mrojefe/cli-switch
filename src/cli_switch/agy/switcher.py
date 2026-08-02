@@ -31,6 +31,7 @@ from cli_switch.paths import (
     agy_google_accounts_path,
     agy_live_token_path,
     agy_oauth_creds_path,
+    check_agy_paths_or_raise,
 )
 from cli_switch.store import Store
 
@@ -57,6 +58,11 @@ def begin_login(name: str) -> LoginSession:
       2. Attendre confirmation.
       3. Appeler complete_login().
     """
+    # Chemins AGY confirmés uniquement sur Linux (cf. paths.py) — sur une
+    # plateforme non vérifiée (Windows natif), cette fonction était définie
+    # mais JAMAIS appelée : le login se serait déroulé en silence contre des
+    # chemins probablement faux plutôt que d'échouer explicitement.
+    check_agy_paths_or_raise()
     evicted = evict_live_credentials()
     return LoginSession(name=name, evicted=evicted)
 
@@ -112,6 +118,7 @@ def switch_to(store: Store, name: str, *, kill_running: bool = False) -> list[in
     Retourne la liste des PIDs tués (vide si kill_running=False ou aucun
     process actif).
     """
+    check_agy_paths_or_raise()
     if not store.profile_exists(name):
         raise ProfileNotFoundError(f"Profil AGY '{name}' introuvable.")
     profile = store.profile(name)
