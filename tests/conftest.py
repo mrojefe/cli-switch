@@ -64,6 +64,18 @@ def _no_real_claude_daemon(monkeypatch):
     monkeypatch.setattr(switcher, "run_claude_auth_login", _no_real_login)
 
 
+@pytest.fixture(autouse=True)
+def _no_real_keyring(monkeypatch):
+    """Empêche les tests d'interagir avec le trousseau système réel (secret-tool)."""
+    from cli_switch.agy import credentials
+
+    mock_keyring_storage = {}
+
+    monkeypatch.setattr(credentials, "get_keyring_token", lambda: mock_keyring_storage.get("antigravity"))
+    monkeypatch.setattr(credentials, "set_keyring_token", lambda tok: mock_keyring_storage.update({"antigravity": tok}) or True)
+    monkeypatch.setattr(credentials, "clear_keyring_token", lambda: mock_keyring_storage.pop("antigravity", None) or True)
+
+
 @pytest.fixture()
 def store(fake_home):
     return Store(data_dir=fake_home["data_dir"])

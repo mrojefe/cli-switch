@@ -108,3 +108,20 @@ def test_switch_to_does_not_kill_by_default(fake_home, store, monkeypatch):
     killed = switcher.switch_to(store, "a", kill_running=False)
     assert killed == []
     assert called["kill"] is False
+
+
+def test_keyring_eviction_and_sync(fake_home, store):
+    from cli_switch.agy import credentials
+
+    # Set mock keyring token
+    credentials.set_keyring_token("keyring-tok-a")
+    session = switcher.begin_login("a")
+    assert session.evicted["keyring"] == b"keyring-tok-a"
+    assert credentials.get_keyring_token() is None
+
+    # Simulate login creating only keyring token
+    credentials.set_keyring_token("keyring-tok-new")
+    switcher.complete_login(store, session, force=True)
+
+    assert store.profile("a").agy_live_token.read_text(encoding="utf-8") == "keyring-tok-new"
+    assert credentials.get_keyring_token() == "keyring-tok-new"

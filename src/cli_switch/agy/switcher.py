@@ -18,13 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from cli_switch.agy import process_detection
-from cli_switch.agy.credentials import (
-    current_agy_email,
-    evict_live_credentials,
-    live_token_exists,
-    restore_live_credentials,
-)
+from cli_switch.agy import credentials, process_detection
 from cli_switch.exceptions import NoCredentialsError, ProfileNotFoundError
 from cli_switch.locking import atomic_copy, cli_switch_lock
 from cli_switch.paths import (
@@ -63,7 +57,7 @@ def begin_login(name: str) -> LoginSession:
     # mais JAMAIS appelée : le login se serait déroulé en silence contre des
     # chemins probablement faux plutôt que d'échouer explicitement.
     check_agy_paths_or_raise()
-    evicted = evict_live_credentials()
+    evicted = credentials.evict_live_credentials()
     return LoginSession(name=name, evicted=evicted)
 
 
@@ -71,15 +65,15 @@ def complete_login(store: Store, session: LoginSession, *, force: bool = False) 
     """Étape 2 du login : vérifie qu'un nouveau token est apparu, capture le
     profil. Si aucun nouveau token n'est apparu, restaure l'ancien (pas de
     perte de session) et lève NoCredentialsError."""
-    if not live_token_exists():
+    if not credentials.live_token_exists():
         if session.evicted:
-            restore_live_credentials(session.evicted)
+            credentials.restore_live_credentials(session.evicted)
         raise NoCredentialsError(
             "Aucun nouveau token AGY détecté — le login a probablement été "
             "annulé. L'ancienne session a été restaurée."
         )
 
-    email = current_agy_email()
+    email = credentials.current_agy_email()
     if not email and not force:
         raise NoCredentialsError(
             "Impossible de détecter l'email du compte AGY actif "
@@ -95,7 +89,13 @@ def complete_login(store: Store, session: LoginSession, *, force: bool = False) 
 
         profile = store.profile(session.name)
         profile.root.mkdir(parents=True, exist_ok=True)
-        atomic_copy(agy_live_token_path(), profile.agy_live_token)
+        if agy_live_token_path().exists():
+            atomic_copy(agy_live_token_path(), profile.agy_live_token)
+        else:
+            kt = credentials.get_keyring_token()
+            if kt:
+                profile.agy_live_token.write_text(kt, encoding="utf-8")
+                agy_live_token_path().write_text(kt, encoding="utf-8")
         if agy_google_accounts_path().exists():
             atomic_copy(agy_google_accounts_path(), profile.agy_google_accounts)
         if agy_oauth_creds_path().exists():
@@ -142,6 +142,8 @@ def switch_to(store: Store, name: str, *, kill_running: bool = False) -> list[in
                 atomic_copy(agy_google_accounts_path(), current_profile.agy_google_accounts)
 
         atomic_copy(profile.agy_live_token, live_path)
+        if profile.agy_live_token.exists():
+            credentials.set_keyring_token(profile.agy_live_token.read_text(encoding="utf-8"))
         if profile.agy_google_accounts.exists():
             atomic_copy(profile.agy_google_accounts, agy_google_accounts_path())
         if profile.agy_oauth_creds.exists():
