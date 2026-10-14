@@ -135,9 +135,16 @@ def switch_to(store: Store, name: str, *, kill_running: bool = False) -> list[in
     with cli_switch_lock(store.lock_path):
         current_name = store.current_agy()
         live_path = agy_live_token_path()
-        if current_name and current_name != name and live_path.exists():
+        if current_name and current_name != name:
             current_profile = store.profile(current_name)
-            atomic_copy(live_path, current_profile.agy_live_token)
+            kt = credentials.get_keyring_token()
+            if kt:
+                current_profile.agy_live_token.write_text(kt, encoding="utf-8")
+                em = credentials._email_from_token_raw(kt)
+                if em:
+                    current_profile.agy_email.write_text(em, encoding="utf-8")
+            elif live_path.exists():
+                atomic_copy(live_path, current_profile.agy_live_token)
             if agy_google_accounts_path().exists():
                 atomic_copy(agy_google_accounts_path(), current_profile.agy_google_accounts)
 

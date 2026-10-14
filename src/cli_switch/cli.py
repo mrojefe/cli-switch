@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import typer
 
+from cli_switch.agy import credentials as agy_credentials
 from cli_switch.agy import switcher as agy_switcher
+from cli_switch.claude import credentials as claude_credentials
 from cli_switch.claude import switcher as claude_switcher
 from cli_switch.exceptions import CliSwitchError, DaemonRestartFailed, LiveProcessConflict
+from cli_switch.locking import atomic_copy, cli_switch_lock
+from cli_switch.paths import (
+    agy_google_accounts_path,
+    agy_live_token_path,
+    agy_oauth_creds_path,
+)
 from cli_switch.store import Store
 
 # `-h` en plus de `--help` partout (sans ça, seul --help marche, ce qui
@@ -171,6 +179,28 @@ def claude_add(
     _warn_duplicate_claude(store, name, email)
 
 
+@claude_app.command("sync")
+def claude_sync(
+    name: str | None = typer.Argument(None, help="Nom du profil (par défaut: profil Claude actif ou email)."),
+) -> None:
+    """Capture et sauvegarde la session Claude actuellement connectée sans redemander de login."""
+    store = _store()
+    target = name or store.current_claude()
+    if not target:
+        email = claude_credentials.current_claude_email()
+        if email:
+            target = email.split("@")[0].replace(".", "_")
+        else:
+            _fail("Aucun profil Claude actif et impossible de détecter l'email courant.")
+            return
+    try:
+        email = claude_switcher.login(store, target)
+        store.set_current_claude(target)
+        _ok(f"Session Claude active enregistrée dans '{target}' ({email}).")
+    except CliSwitchError as e:
+        _fail(str(e))
+
+
 @claude_app.command("rm")
 def claude_rm(name: str, yes: bool = typer.Option(False, "-y", "--yes")) -> None:
     """Supprime uniquement la partie Claude d'un profil (garde AGY intact)."""
@@ -325,6 +355,46 @@ def agy_add(name: str) -> None:
         _ok(f"Profil AGY '{name}' enregistré ; compte précédent '{active_before}' restauré comme actif.")
     else:
         _ok(f"Profil AGY '{name}' enregistré et actif.")
+
+
+@agy_app.command("sync")
+def agy_sync(
+    name: str | None = typer.Argument(None, help="Nom du profil (par défaut: profil AGY actif ou email)."),
+) -> None:
+    """Capture et sauvegarde la session AGY actuellement connectée sans redemander de login."""
+    store = _store()
+    target = name or store.current_agy()
+    if not target:
+        email = agy_credentials.current_agy_email()
+        if email:
+            target = email.split("@")[0].replace(".", "_")
+        else:
+            _fail("Aucun profil AGY actif et impossible de détecter l'email courant.")
+            return
+
+    kt = agy_credentials.get_keyring_token()
+    live_path = agy_live_token_path()
+    if not kt and not live_path.exists():
+        _fail("Aucune session AGY active trouvée (ni dans le trousseau ni sur le disque).")
+        return
+
+    email = agy_credentials.current_agy_email()
+    with cli_switch_lock(store.lock_path):
+        profile = store.profile(target)
+        profile.root.mkdir(parents=True, exist_ok=True)
+        if kt:
+            profile.agy_live_token.write_text(kt, encoding="utf-8")
+        elif live_path.exists():
+            atomic_copy(live_path, profile.agy_live_token)
+        if agy_google_accounts_path().exists():
+            atomic_copy(agy_google_accounts_path(), profile.agy_google_accounts)
+        if agy_oauth_creds_path().exists():
+            atomic_copy(agy_oauth_creds_path(), profile.agy_oauth_creds)
+        if email:
+            profile.agy_email.write_text(email, encoding="utf-8")
+        store.set_current_agy(target)
+
+    _ok(f"Session AGY active enregistrée dans '{target}' ({email or 'inconnu'}).")
 
 
 @agy_app.command("rm")
@@ -672,6 +742,29 @@ def add_both(name: str) -> None:
     agy_add(name)
 
 
+@app.command("sync")
+def sync_both(
+    name: str | None = typer.Argument(None, help="Nom du profil à synchroniser (par défaut: profils actifs)."),
+) -> None:
+    """Capture et sauvegarde les sessions actives (Claude ET AGY) sans redemander de login."""
+    try:
+        claude_sync(name)
+    except typer.Exit:
+        pass
+    try:
+        agy_sync(name)
+    except typer.Exit:
+        pass
+
+
+@app.command("save", hidden=True)
+def save_both(
+    name: str | None = typer.Argument(None),
+) -> None:
+    """Alias pour 'sync'."""
+    sync_both(name)
+
+
 @app.command("clear")
 def clear_all(
     yes: bool = typer.Option(False, "-y", "--yes", help="Pas de confirmation."),
@@ -850,9 +943,9 @@ def switch_both(name: str) -> None:
 
 _TOP_LEVEL_COMMANDS = {
     "login", "add", "list", "current", "rm", "rename", "switch", "clear",
-    "export", "import", "claude", "agy",
+    "export", "import", "claude", "agy", "sync", "save",
 }
-_SUB_COMMANDS = {"login", "add", "switch", "current", "rm", "clear", "proxy", "use", "run"}
+_SUB_COMMANDS = {"login", "add", "switch", "current", "rm", "clear", "proxy", "use", "run", "sync", "save"}
 
 
 _HELP_WORDS = {"help", "-h", "--help"}
