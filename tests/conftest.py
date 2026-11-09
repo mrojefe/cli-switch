@@ -33,13 +33,16 @@ def fake_home(tmp_path, monkeypatch):
     monkeypatch.setattr(paths, "claude_config_home", lambda: claude_dir)
     monkeypatch.setattr(paths, "claude_global_config_path", lambda: claude_home / ".claude.json")
     monkeypatch.setattr(paths, "agy_config_home", lambda: agy_dir)
+    monkeypatch.setattr(paths, "codex_config_home", lambda: claude_home / ".codex")
     monkeypatch.setattr(paths, "cli_switch_data_dir", lambda: data_dir)
 
     return {
         "claude_dir": claude_dir,
         "agy_dir": agy_dir,
+        "codex_dir": claude_home / ".codex",
         "data_dir": data_dir,
     }
+
 
 
 @pytest.fixture(autouse=True)
@@ -66,14 +69,17 @@ def _no_real_claude_daemon(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_real_keyring(monkeypatch):
-    """Empêche les tests d'interagir avec le trousseau système réel (secret-tool)."""
-    from cli_switch.agy import credentials
+    """Empêche les tests d'interagir avec le trousseau système réel (secret-tool)
+    ou de redémarrer le vrai `language_server` d'Antigravity Desktop."""
+    from cli_switch.agy import credentials, process_detection
 
     mock_keyring_storage = {}
 
+    monkeypatch.setattr(credentials, "discover_dbus_addresses", lambda: [])
     monkeypatch.setattr(credentials, "get_keyring_token", lambda: mock_keyring_storage.get("antigravity"))
     monkeypatch.setattr(credentials, "set_keyring_token", lambda tok: mock_keyring_storage.update({"antigravity": tok}) or True)
-    monkeypatch.setattr(credentials, "clear_keyring_token", lambda: mock_keyring_storage.pop("antigravity", None) or True)
+    monkeypatch.setattr(credentials, "clear_keyring_token", lambda *a, **k: mock_keyring_storage.pop("antigravity", None) or True)
+    monkeypatch.setattr(process_detection, "restart_desktop_language_server", lambda *a, **k: [])
 
 
 @pytest.fixture()

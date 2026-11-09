@@ -8,6 +8,8 @@ from cli_switch.agy import credentials as agy_credentials
 from cli_switch.agy import switcher as agy_switcher
 from cli_switch.claude import credentials as claude_credentials
 from cli_switch.claude import switcher as claude_switcher
+from cli_switch.codex import credentials as codex_credentials
+from cli_switch.codex import switcher as codex_switcher
 from cli_switch.exceptions import CliSwitchError, DaemonRestartFailed, LiveProcessConflict
 from cli_switch.locking import atomic_copy, cli_switch_lock
 from cli_switch.paths import (
@@ -22,7 +24,12 @@ from cli_switch.store import Store
 _HELP_OPTS = {"help_option_names": ["-h", "--help"]}
 
 app = typer.Typer(
-    help="Bascule entre plusieurs comptes Claude Code et Antigravity (AGY).",
+    help="Bascule entre plusieurs comptes Claude Code, Antigravity (AGY) et OpenAI Codex.",
+    epilog=(
+        "Raccourcis : `cli-switch <profil>` = switch ; `ls` = list ; "
+        "`claude|agy|codex ls` = list filtré ; `claude|agy|codex <profil>` = switch de la famille. "
+        "Alias shell : cs, csa (agy), cscl (claude), csco (codex) ; suffixe s = switch (csas, cscls, cscos)."
+    ),
     no_args_is_help=True,
     context_settings=_HELP_OPTS,
 )
@@ -32,9 +39,18 @@ agy_proxy_app = typer.Typer(
     help="Proxy AGY multi-compte (hot-swap de toutes les sessions).",
     context_settings=_HELP_OPTS,
 )
+codex_app = typer.Typer(help="Commandes spécifiques à OpenAI Codex.", context_settings=_HELP_OPTS)
+instance_app = typer.Typer(
+    help="Gestion des environnements d'instance isolés (multi-comptes).",
+    context_settings=_HELP_OPTS,
+)
 app.add_typer(claude_app, name="claude")
 app.add_typer(agy_app, name="agy")
+app.add_typer(codex_app, name="codex")
+app.add_typer(instance_app, name="instance")
 agy_app.add_typer(agy_proxy_app, name="proxy")
+
+
 
 
 def _store() -> Store:
@@ -434,11 +450,13 @@ def agy_clear_all(yes: bool = typer.Option(False, "-y", "--yes")) -> None:
         store.remove_profile_if_empty(name)
     store.current_agy_path.unlink(missing_ok=True)
 
-    # 2. Token live AGY → supprimé (AGY le recrée au prochain login)
+    # 2. Token live AGY (CLI + Desktop) → supprimé (AGY le recrée au prochain login)
     live_tok = agy_live_token_path()
     if live_tok.exists():
         live_tok.unlink()
         _info(f"Token live supprimé : {live_tok}")
+    agy_credentials.clear_live_token_files()
+    agy_credentials.clear_keyring_token()
 
     # 3. google_accounts.json → supprimé
     g_accounts = agy_google_accounts_path()
@@ -473,6 +491,11 @@ def _agy_switch_impl(name: str, kill: bool) -> None:
     if killed:
         _info(f"Process agy tués : {', '.join(map(str, killed))}")
     _ok(f"AGY → profil '{name}' actif (token écrit sur le disque).")
+    restarted_ls = list(agy_switcher.LAST_RESTARTED_DESKTOP_PIDS)
+    if restarted_ls:
+        _info(
+            f"Antigravity Desktop language_server rechargé à chaud (PID {', '.join(map(str, restarted_ls))})."
+        )
 
     # Rappel du mécanisme réel (cf. MECHANISM_AGY.md) : un process `agy` déjà
     # lancé garde son compte en mémoire — le swap disque ne l'affecte pas.
@@ -687,7 +710,82 @@ def agy_run(ctx: typer.Context) -> None:
         _fail(f"Impossible de lancer `agy` : {e}")
 
 
-# ── commandes combinées (les deux outils) ────────────────────────────────
+# ── codex login/switch/current ───────────────────────────────────────────
+
+
+@codex_app.command("login")
+def codex_login(
+    name: str,
+    current: bool = typer.Option(
+        False,
+        "--current",
+        "-c",
+        help="Capturer le compte DÉJÀ connecté sans relancer `codex login`.",
+    ),
+) -> None:
+    """Connecte un nouveau compte Codex ou capture le compte actif sous le profil <name>."""
+    store = _store()
+    if not current:
+        try:
+            codex_switcher.run_codex_login()
+        except RuntimeError as e:
+            _fail(str(e))
+            return
+    try:
+        email = codex_switcher.capture_current(store, name)
+    except CliSwitchError as e:
+        _fail(str(e))
+        return
+    store.set_current_codex(name)
+    _ok(f"Compte Codex '{email}' enregistré sous le profil '{name}'.")
+
+
+@codex_app.command("add")
+def codex_add(name: str) -> None:
+    """Enregistre le compte Codex ACTUELLEMENT connecté sous le profil <name>."""
+    codex_login(name=name, current=True)
+
+
+@codex_app.command("current")
+def codex_current() -> None:
+    """Affiche le profil Codex actif."""
+    store = _store()
+    name = store.current_codex()
+    email = codex_credentials.current_codex_email()
+    if name:
+        typer.echo(f"Profil Codex actif : {name} ({email or 'email non détecté'})")
+    else:
+        typer.echo(f"Profil Codex actif : (aucun) ({email or 'aucun compte'})")
+
+
+@codex_app.command("switch")
+def codex_switch_cmd(name: str) -> None:
+    """Bascule Codex vers le profil <name>."""
+    store = _store()
+    try:
+        codex_switcher.switch(store, name)
+    except CliSwitchError as e:
+        _fail(str(e))
+        return
+    _ok(f"Codex → profil '{name}' actif.")
+
+
+@codex_app.command("rm")
+def codex_rm(name: str, yes: bool = typer.Option(False, "-y", "--yes")) -> None:
+    """Supprime les credentials Codex d'un profil."""
+    store = _store()
+    if not store.profile_exists(name):
+        _fail(f"Profil '{name}' introuvable.")
+        return
+    if not yes and not typer.confirm(f"Supprimer les credentials Codex du profil '{name}' ?", default=False):
+        raise typer.Exit(code=1)
+    store.clear_codex_side(name)
+    store.remove_profile_if_empty(name)
+    _ok(f"Credentials Codex supprimés du profil '{name}'.")
+
+
+# ── commandes combinées (les outils) ────────────────────────────────────
+
 
 
 @app.command("login")
@@ -698,7 +796,15 @@ def login_both(name: str) -> None:
 
 
 @app.command("list")
-def list_profiles() -> None:
+def list_profiles(
+    only: str | None = typer.Option(
+        None, "--only", help="Limiter l'affichage à une famille : claude, agy ou codex."
+    ),
+) -> None:
+    """Liste les profils et leurs comptes (alias : `ls`). Par famille : `claude ls`, `agy ls`, `codex ls`."""
+    if only is not None and only not in ("claude", "agy", "codex"):
+        _fail(f"Famille inconnue « {only} » (attendu : claude, agy, codex).")
+        return
     store = _store()
     profiles = store.list_profiles()
     if not profiles:
@@ -706,24 +812,45 @@ def list_profiles() -> None:
         return
     current_claude = store.current_claude()
     current_agy = store.current_agy()
+    current_codex = store.current_codex()
     for name in profiles:
         p = store.profile(name)
         claude_email = p.claude_email.read_text(encoding="utf-8").strip() if p.claude_email.exists() else "-"
         agy_email = p.agy_email.read_text(encoding="utf-8").strip() if p.agy_email.exists() else "-"
+        codex_email = p.codex_email.read_text(encoding="utf-8").strip() if p.codex_email.exists() else "-"
         marker_claude = "●" if current_claude == name else " "
         marker_agy = "●" if current_agy == name else " "
-        typer.echo(f"{name:20}  claude[{marker_claude}] {claude_email:35}  agy[{marker_agy}] {agy_email}")
+        marker_codex = "●" if current_codex == name else " "
+        cols = {
+            "claude": f"claude[{marker_claude}] {claude_email:25}",
+            "agy": f"agy[{marker_agy}] {agy_email:25}",
+            "codex": f"codex[{marker_codex}] {codex_email}",
+        }
+        if only:
+            if cols_email_empty(only, claude_email, agy_email, codex_email):
+                continue  # profil sans compte dans cette famille : on ne l'affiche pas
+            typer.echo(f"{name:15}  {cols[only].rstrip()}")
+        else:
+            typer.echo(f"{name:15}  {cols['claude']}  {cols['agy']}  {cols['codex']}")
+
+
+def cols_email_empty(family: str, claude_email: str, agy_email: str, codex_email: str) -> bool:
+    return {"claude": claude_email, "agy": agy_email, "codex": codex_email}[family] == "-"
 
 
 @app.command("current")
 def show_current() -> None:
+    """Affiche les profils actifs (Claude, AGY, Codex)."""
     store = _store()
     typer.echo(f"Claude : {store.current_claude() or '(aucun)'}")
     typer.echo(f"AGY    : {store.current_agy() or '(aucun)'}")
+    typer.echo(f"Codex  : {store.current_codex() or '(aucun)'}")
+
 
 
 @app.command("rm")
 def remove_profile(name: str, yes: bool = typer.Option(False, "-y", "--yes")) -> None:
+    """Supprime un profil entier (Claude + AGY + Codex). Confirmation sauf avec -y."""
     store = _store()
     if not store.profile_exists(name):
         _fail(f"Profil '{name}' introuvable.")
@@ -839,7 +966,8 @@ def clear_all(
                 pass
 
     def _reset_agy_live() -> None:
-        agy_live_token_path().unlink(missing_ok=True)
+        agy_credentials.clear_live_token_files()
+        agy_credentials.clear_keyring_token()
         agy_google_accounts_path().unlink(missing_ok=True)
         _info("Fichiers live AGY supprimés.")
 
@@ -892,6 +1020,7 @@ def import_profiles(in_file: str, yes: bool = typer.Option(False, "-y", "--yes")
 
 @app.command("rename")
 def rename_profile(old: str, new: str) -> None:
+    """Renomme le profil <old> en <new>."""
     store = _store()
     try:
         store.rename_profile(old, new)
@@ -903,13 +1032,14 @@ def rename_profile(old: str, new: str) -> None:
 
 @app.command("switch")
 def switch_both(name: str) -> None:
-    """Bascule Claude ET AGY vers le profil <name> (ceux configurés)."""
+    """Bascule Claude, AGY et Codex vers le profil <name> (ceux configurés)."""
     store = _store()
 
     claude_ok = store.profile(name).claude_credentials.exists()
     agy_ok = store.profile(name).agy_live_token.exists()
-    if not claude_ok and not agy_ok:
-        _fail(f"Profil '{name}' introuvable (ni Claude ni AGY).")
+    codex_ok = store.profile(name).codex_auth.exists()
+    if not claude_ok and not agy_ok and not codex_ok:
+        _fail(f"Profil '{name}' introuvable (aucun credential Claude, AGY ou Codex).")
         return
 
     if claude_ok:
@@ -931,21 +1061,117 @@ def switch_both(name: str) -> None:
     else:
         _info("Aucun compte AGY enregistré pour ce profil, ignoré.")
 
+    if codex_ok:
+        try:
+            codex_switcher.switch(store, name)
+            _ok(f"Codex → profil '{name}' actif.")
+        except CliSwitchError as e:
+            _warn(f"Codex : {e}")
+    else:
+        _info("Aucun compte Codex enregistré pour ce profil, ignoré.")
 
-# ── dispatch `cli-switch <nom>` / `cli-switch claude <nom>` / `cli-switch agy <nom>` ──
+
+# ── Instance & Run (Multi-comptes isolés) ───────────────────────────────────
+
+
+@instance_app.command("setup")
+def instance_setup(name: str) -> None:
+    """Prépare ou met à jour l'arborescence d'une instance isolée pour un profil."""
+    from cli_switch.instances import setup_instance
+
+    try:
+        path = setup_instance(name)
+        _ok(f"Instance '{name}' prête dans : {path}")
+    except Exception as e:
+        _fail(str(e))
+
+
+@instance_app.command("path")
+def instance_path(name: str) -> None:
+    """Affiche le chemin absolu de l'instance d'un profil."""
+    from cli_switch.instances import get_instance_dir
+
+    typer.echo(str(get_instance_dir(name)))
+
+
+@instance_app.command("list")
+def instance_list() -> None:
+    """Liste les instances isolées existantes."""
+    from cli_switch.instances import instances_base_dir
+
+    base = instances_base_dir()
+    if not base.exists():
+        typer.echo("(aucune instance)")
+        return
+    instances = [d.name for d in base.iterdir() if d.is_dir()]
+    if not instances:
+        typer.echo("(aucune instance)")
+        return
+    for inst in sorted(instances):
+        typer.echo(f"- {inst} ({base / inst})")
+
+
+@app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def app_run(
+    ctx: typer.Context,
+    profile: str = typer.Option(..., "--profile", "-p", help="Nom du profil d'instance."),
+    provider: str = typer.Option("all", "--provider", help="Provider ('codex', 'agy', ou 'all')."),
+) -> None:
+    """Exécute une commande dans l'environnement isolé d'un profil sans toucher aux sessions globales."""
+    from cli_switch.instances import run_in_instance
+
+    cmd = ctx.args
+    if not cmd:
+        _fail("Aucune commande spécifiée.")
+    code = run_in_instance(profile, cmd, provider=provider)
+    raise typer.Exit(code=code)
+
+
+@codex_app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def codex_run(
+    ctx: typer.Context,
+    profile: str = typer.Option(..., "--profile", "-p", help="Nom du profil d'instance Codex."),
+) -> None:
+    """Exécute une commande sous Codex isolé avec le profil spécifié."""
+    from cli_switch.instances import run_in_instance
+
+    cmd = ctx.args
+    if not cmd:
+        _fail("Aucune commande spécifiée.")
+    code = run_in_instance(profile, cmd, provider="codex")
+    raise typer.Exit(code=code)
+
+
+@agy_app.command("run", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
+def agy_run(
+    ctx: typer.Context,
+    profile: str = typer.Option(..., "--profile", "-p", help="Nom du profil d'instance AGY."),
+) -> None:
+    """Exécute une commande sous AGY isolé avec le profil spécifié."""
+    from cli_switch.instances import run_in_instance
+
+    cmd = ctx.args
+    if not cmd:
+        _fail("Aucune commande spécifiée.")
+    code = run_in_instance(profile, cmd, provider="agy")
+    raise typer.Exit(code=code)
+
+
+# ── dispatch `cli-switch <nom>` / `cli-switch claude <nom>` / `cli-switch agy <nom>` / `cli-switch codex <nom>` ──
 #
 # Typer/Click ne permet pas de mélanger proprement un argument positionnel
 # optionnel sur un groupe ET des sous-commandes du même groupe (ambiguïté :
 # "list" serait interprété comme la valeur de l'argument plutôt que comme la
 # sous-commande "list"). On réécrit donc argv en amont : si le premier mot
-# (ou le second, sous "claude"/"agy") n'est pas une sous-commande connue,
+# (ou le second, sous "claude"/"agy"/"codex") n'est pas une sous-commande connue,
 # on insère "switch" avant, pour retomber sur les vraies commandes ci-dessus.
 
 _TOP_LEVEL_COMMANDS = {
-    "login", "add", "list", "current", "rm", "rename", "switch", "clear",
-    "export", "import", "claude", "agy", "sync", "save",
+    "login", "add", "list", "ls", "current", "rm", "rename", "switch", "clear",
+    "export", "import", "claude", "agy", "codex", "instance", "run", "sync", "save",
 }
-_SUB_COMMANDS = {"login", "add", "switch", "current", "rm", "clear", "proxy", "use", "run", "sync", "save"}
+_SUB_COMMANDS = {"login", "add", "switch", "current", "rm", "clear", "proxy", "use", "run", "setup", "path", "list", "ls", "sync", "save"}
+
 
 
 _HELP_WORDS = {"help", "-h", "--help"}
@@ -981,9 +1207,9 @@ def _typo_error(argv: list[str]) -> str | None:
             f"« {argv[0]} » n'est pas une commande connue, et un switch de profil "
             f"ne prend qu'un seul nom (reçu : {' '.join(argv)})." + hint
         )
-    # Groupe claude/agy : sous-commande inconnue SUIVIE d'arguments → typo.
+    # Groupe claude/agy/codex : sous-commande inconnue SUIVIE d'arguments → typo.
     if (
-        argv[0] in ("claude", "agy")
+        argv[0] in ("claude", "agy", "codex")
         and len(argv) >= 3
         and not argv[1].startswith("-")
         and argv[1] not in _SUB_COMMANDS
@@ -1007,15 +1233,21 @@ def _rewrite_argv(argv: list[str]) -> list[str]:
     if argv[0].startswith("-"):
         return argv
     argv = list(argv)
+    # `ls` = `list` ; `<famille> ls|list` = liste filtrée sur la famille.
+    if argv[0] == "ls":
+        return ["list", *argv[1:]]
+    if argv[0] in ("claude", "agy", "codex") and len(argv) >= 2 and argv[1] in ("ls", "list"):
+        return ["list", "--only", argv[0], *argv[2:]]
     if argv[0] not in _TOP_LEVEL_COMMANDS:
         return ["switch", *argv]
-    if argv[0] in ("claude", "agy") and len(argv) >= 2:
-        # `claude help` / `claude -h` / `agy --help` → aide de la sous-commande.
+    if argv[0] in ("claude", "agy", "codex") and len(argv) >= 2:
+        # `claude help` / `codex --help` / `agy -h` → aide de la sous-commande.
         if argv[1] in _HELP_WORDS:
             return [argv[0], "--help", *argv[2:]]
         if not argv[1].startswith("-") and argv[1] not in _SUB_COMMANDS:
             return [argv[0], "switch", *argv[1:]]
     return argv
+
 
 
 def main() -> None:

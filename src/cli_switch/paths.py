@@ -122,6 +122,30 @@ def agy_live_token_path() -> Path:
     return agy_config_home() / "antigravity-cli" / "antigravity-oauth-token"
 
 
+def agy_desktop_dir() -> Path:
+    """Répertoire de données d'Antigravity 2.0 Desktop (`--app_data_dir antigravity`)."""
+    return agy_config_home() / "antigravity"
+
+
+def agy_desktop_oauth_token_path() -> Path:
+    """Fichier de token OAuth dans le répertoire Desktop (`~/.gemini/antigravity/`)."""
+    return agy_desktop_dir() / "antigravity-oauth-token"
+
+
+def agy_desktop_jetski_token_path() -> Path:
+    """Fichier de token standalone legacy/Desktop (`~/.gemini/antigravity/jetski-standalone-oauth-token`)."""
+    return agy_desktop_dir() / "jetski-standalone-oauth-token"
+
+
+def agy_all_live_token_paths() -> tuple[Path, Path, Path]:
+    """Tous les emplacements de token OAuth actif (CLI + Antigravity 2.0 Desktop)."""
+    return (
+        agy_live_token_path(),
+        agy_desktop_oauth_token_path(),
+        agy_desktop_jetski_token_path(),
+    )
+
+
 def check_agy_paths_or_raise() -> None:
     """Vérifie que les chemins AGY attendus existent, sinon lève une erreur
     explicite plutôt que d'échouer silencieusement (surtout utile sur une
@@ -135,3 +159,18 @@ def check_agy_paths_or_raise() -> None:
                 "il faut les valider manuellement sur cette plateforme avant "
                 "d'utiliser cli-switch pour AGY ici."
             )
+
+
+# ── Chemins OpenAI Codex ───────────────────────────────────────────────────
+
+
+def codex_config_home() -> Path:
+    override = os.environ.get("CODEX_HOME")
+    if override:
+        return Path(override)
+    return Path.home() / ".codex"
+
+
+def codex_auth_path() -> Path:
+    return codex_config_home() / "auth.json"
+

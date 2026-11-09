@@ -39,6 +39,9 @@ class LoginSession:
     evicted: dict[str, bytes]
 
 
+LAST_RESTARTED_DESKTOP_PIDS: list[int] = []
+
+
 def begin_login(name: str) -> LoginSession:
     """Étape 1 du login : évince le token de session ET le refresh_token
     legacy (oauth_creds.json) — les deux sont nécessaires, sinon `agy` se
@@ -91,11 +94,12 @@ def complete_login(store: Store, session: LoginSession, *, force: bool = False) 
         profile.root.mkdir(parents=True, exist_ok=True)
         if agy_live_token_path().exists():
             atomic_copy(agy_live_token_path(), profile.agy_live_token)
+            credentials.write_live_token_files(profile.agy_live_token.read_bytes())
         else:
             kt = credentials.get_keyring_token()
             if kt:
                 profile.agy_live_token.write_text(kt, encoding="utf-8")
-                agy_live_token_path().write_text(kt, encoding="utf-8")
+                credentials.write_live_token_files(kt)
         if agy_google_accounts_path().exists():
             atomic_copy(agy_google_accounts_path(), profile.agy_google_accounts)
         if agy_oauth_creds_path().exists():
@@ -137,24 +141,35 @@ def switch_to(store: Store, name: str, *, kill_running: bool = False) -> list[in
         live_path = agy_live_token_path()
         if current_name and current_name != name:
             current_profile = store.profile(current_name)
+            expected_email = (
+                current_profile.agy_email.read_text(encoding="utf-8").strip()
+                if current_profile.agy_email.exists()
+                else None
+            )
             kt = credentials.get_keyring_token()
-            if kt:
+            kt_email = credentials._email_from_token_raw(kt) if kt else None
+            if kt and (not expected_email or not kt_email or kt_email == expected_email):
                 current_profile.agy_live_token.write_text(kt, encoding="utf-8")
-                em = credentials._email_from_token_raw(kt)
-                if em:
-                    current_profile.agy_email.write_text(em, encoding="utf-8")
+                if kt_email:
+                    current_profile.agy_email.write_text(kt_email, encoding="utf-8")
             elif live_path.exists():
-                atomic_copy(live_path, current_profile.agy_live_token)
+                live_raw = live_path.read_text(encoding="utf-8", errors="ignore")
+                live_email = credentials._email_from_token_raw(live_raw)
+                if not expected_email or not live_email or live_email == expected_email:
+                    atomic_copy(live_path, current_profile.agy_live_token)
             if agy_google_accounts_path().exists():
                 atomic_copy(agy_google_accounts_path(), current_profile.agy_google_accounts)
 
-        atomic_copy(profile.agy_live_token, live_path)
-        if profile.agy_live_token.exists():
-            credentials.set_keyring_token(profile.agy_live_token.read_text(encoding="utf-8"))
+        token_bytes = profile.agy_live_token.read_bytes()
+        credentials.write_live_token_files(token_bytes)
+        credentials.set_keyring_token(token_bytes.decode("utf-8", errors="ignore"))
         if profile.agy_google_accounts.exists():
             atomic_copy(profile.agy_google_accounts, agy_google_accounts_path())
         if profile.agy_oauth_creds.exists():
             atomic_copy(profile.agy_oauth_creds, agy_oauth_creds_path())
         store.set_current_agy(name)
 
+    restarted_desktop = process_detection.restart_desktop_language_server()
+    LAST_RESTARTED_DESKTOP_PIDS.clear()
+    LAST_RESTARTED_DESKTOP_PIDS.extend(restarted_desktop)
     return killed

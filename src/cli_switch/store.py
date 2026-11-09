@@ -66,6 +66,14 @@ class ProfilePaths:
     def agy_email(self) -> Path:
         return self.root / "agy.email"
 
+    @property
+    def codex_auth(self) -> Path:
+        return self.root / "codex_auth.json"
+
+    @property
+    def codex_email(self) -> Path:
+        return self.root / "codex.email"
+
 
 class Store:
     """Accès au registre de profils. Une seule instance par process."""
@@ -92,6 +100,7 @@ class Store:
         self.lock_path = self.data_dir / ".lock"
         self.current_claude_path = self.data_dir / "current_claude"
         self.current_agy_path = self.data_dir / "current_agy"
+        self.current_codex_path = self.data_dir / "current_codex"
         self.profiles_dir.mkdir(parents=True, exist_ok=True)
         self._migrate_legacy_filenames()
 
@@ -133,6 +142,9 @@ class Store:
     def current_agy(self) -> str | None:
         return self.read_current(self.current_agy_path)
 
+    def current_codex(self) -> str | None:
+        return self.read_current(self.current_codex_path)
+
     def set_current_claude(self, name: str) -> None:
         from cli_switch.locking import atomic_write_text
 
@@ -143,13 +155,24 @@ class Store:
 
         atomic_write_text(self.current_agy_path, name)
 
+    def set_current_codex(self, name: str) -> None:
+        from cli_switch.locking import atomic_write_text
+
+        atomic_write_text(self.current_codex_path, name)
+
     def find_profile_by_email(self, tool: str, email: str) -> str | None:
         """Cherche un profil existant portant cet email pour l'outil donné
-        ('claude' ou 'agy'), pour éviter les doublons silencieux (même
-        piège que le bash claude-switch avait dû gérer)."""
+        ('claude', 'agy' ou 'codex'), pour éviter les doublons silencieux."""
         for name in self.list_profiles():
             p = self.profile(name)
-            email_file = p.claude_email if tool == "claude" else p.agy_email
+            if tool == "claude":
+                email_file = p.claude_email
+            elif tool == "agy":
+                email_file = p.agy_email
+            elif tool == "codex":
+                email_file = p.codex_email
+            else:
+                continue
             if email_file.exists() and email_file.read_text(encoding="utf-8").strip() == email:
                 return name
         return None
@@ -175,9 +198,15 @@ class Store:
         for f in (p.agy_oauth_creds, p.agy_google_accounts, p.agy_live_token, p.agy_email):
             f.unlink(missing_ok=True)
 
+    def clear_codex_side(self, name: str) -> None:
+        """Équivalent Codex de clear_claude_side."""
+        p = self.profile(name)
+        for f in (p.codex_auth, p.codex_email):
+            f.unlink(missing_ok=True)
+
     def has_any_side(self, name: str) -> bool:
         p = self.profile(name)
-        return p.claude_credentials.exists() or p.agy_live_token.exists()
+        return p.claude_credentials.exists() or p.agy_live_token.exists() or p.codex_auth.exists()
 
     def remove_profile_if_empty(self, name: str) -> None:
         """Supprime le dossier du profil s'il ne reste plus aucun fichier
@@ -188,7 +217,7 @@ class Store:
             root.rmdir()
 
     def clear_all(self) -> None:
-        """Supprime TOUS les profils et l'état courant (Claude + AGY)."""
+        """Supprime TOUS les profils et l'état courant (Claude + AGY + Codex)."""
         import shutil
 
         if self.profiles_dir.is_dir():
@@ -196,6 +225,7 @@ class Store:
             self.profiles_dir.mkdir(parents=True, exist_ok=True)
         self.current_claude_path.unlink(missing_ok=True)
         self.current_agy_path.unlink(missing_ok=True)
+        self.current_codex_path.unlink(missing_ok=True)
 
     def rename_profile(self, old: str, new: str) -> None:
         old_root = self.profile(old).root
