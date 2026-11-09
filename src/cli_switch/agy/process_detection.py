@@ -49,7 +49,7 @@ def list_desktop_language_server_pids() -> list[int]:
     return pids
 
 
-def restart_desktop_language_server(timeout: float = 6.0) -> list[int]:
+def restart_desktop_language_server(timeout: float = 8.0) -> list[int]:
     """Envoie SIGTERM au process `language_server` d'Antigravity 2.0 Desktop
     (SANS toucher au process UI Electron `antigravity`), puis attend jusqu'à
     `timeout` secondes qu'Electron (`monitorLsCrashInternal`) relance un nouveau

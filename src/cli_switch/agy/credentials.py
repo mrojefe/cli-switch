@@ -85,7 +85,10 @@ def discover_dbus_addresses() -> list[str]:
                 name = (info.get("name") or "").lower()
                 cmdline = [str(x) for x in (info.get("cmdline") or [])]
                 cmd_lower = " ".join(cmdline).lower()
-                if "antigravity" not in name and "language_server" not in name and "antigravity" not in cmd_lower and "language_server" not in cmd_lower:
+                if not any(
+                    kw in name or kw in cmd_lower
+                    for kw in ("antigravity", "language_server", "gnome-keyring-daemon", "xfce4-session")
+                ):
                     continue
                 bus = _read_proc_dbus_address(info["pid"], proc)
                 if not bus:
